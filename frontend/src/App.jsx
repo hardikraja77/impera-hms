@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
-import { useEchoConnection } from './hooks/useEcho';
+import EchoInitializer from './components/EchoInitializer';
 import ProtectedRoute from './components/ProtectedRoute';
 import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
@@ -10,11 +10,9 @@ import ReceptionistDashboard from './pages/receptionist/ReceptionistDashboard';
 import NotFoundPage from './pages/NotFoundPage';
 
 function App() {
-  // Initialize Echo connection based on auth state
-  useEchoConnection();
-
   return (
     <AuthProvider>
+      <EchoInitializer />
       <BrowserRouter>
         <Routes>
           {/* Public Routes */}
