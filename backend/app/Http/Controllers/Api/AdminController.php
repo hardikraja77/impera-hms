@@ -264,6 +264,33 @@ class AdminController extends Controller
         ]);
     }
 
+    // ── Next Appointments (Follow-ups) ──
+
+    public function nextAppointments(Request $request): JsonResponse
+    {
+        $patients = Patient::whereHas('consultation', function ($q) use ($request) {
+            $q->whereNotNull('next_appointment');
+
+            if ($request->has('date') && $request->date) {
+                // Filter by exact date
+                $q->whereDate('next_appointment', $request->date);
+            } else {
+                // Default: show from today onwards
+                $q->where('next_appointment', '>=', now()->toDateString());
+            }
+        })
+        ->with(['doctor.user', 'consultation'])
+        ->get()
+        ->sortBy('consultation.next_appointment');
+
+        // Optionally filter by doctor
+        if ($request->doctor_id) {
+            $patients = $patients->filter(fn ($p) => $p->doctor_id == $request->doctor_id);
+        }
+
+        return response()->json($patients->values());
+    }
+
     // ── All Patients ──
 
     public function indexPatients(Request $request): JsonResponse

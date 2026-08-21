@@ -171,19 +171,26 @@ class ReceptionistController extends Controller
 
     /**
      * Get doctor-assigned follow-up / next appointments
+     * Supports optional date filter (DATE(next_appointment) = selected_date)
      * Only shows patients with doctor-set next_appointments, sorted chronologically
      */
     public function nextAppointments(Request $request): JsonResponse
     {
-        $today = now()->toDateString();
+        $patients = Patient::whereHas('consultation', function ($q) use ($request) {
+            $q->whereNotNull('next_appointment');
 
-        $patients = Patient::whereHas('consultation', function ($q) use ($today) {
-            $q->where('next_appointment', '>=', $today)
-              ->whereNotNull('next_appointment');
+            if ($request->has('date') && $request->date) {
+                // Filter by exact date
+                $q->whereDate('next_appointment', $request->date);
+            } else {
+                // Default: show from today onwards
+                $q->where('next_appointment', '>=', now()->toDateString());
+            }
         })
         ->with(['doctor.user', 'consultation'])
-        ->orderBy('consultations.next_appointment')
-        ->get();
+        ->get()
+        ->sortBy('consultation.next_appointment')
+        ->values();
 
         return response()->json($patients);
     }
