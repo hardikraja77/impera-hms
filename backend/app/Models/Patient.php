@@ -12,22 +12,17 @@ class Patient extends Model
 {
     use HasFactory;
 
+    // Static profile data only (no visit-level fields)
     protected $fillable = [
         'name',
         'age',
         'gender',
         'phone',
-        'symptoms',
         'doctor_id',
         'created_by',
         'status',
         'family_id',
         'relation',
-        'appointment_time',
-    ];
-
-    protected $casts = [
-        'appointment_time' => 'datetime',
     ];
 
     public function doctor(): BelongsTo
@@ -40,9 +35,30 @@ class Patient extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    /**
+     * All visits (consultations) for this patient.
+     */
+    public function consultations(): HasMany
+    {
+        return $this->hasMany(Consultation::class);
+    }
+
+    /**
+     * The latest consultation (for backward compatibility).
+     */
     public function consultation(): HasOne
     {
-        return $this->hasOne(Consultation::class);
+        return $this->hasOne(Consultation::class)->latestOfMany();
+    }
+
+    /**
+     * Active / current consultation.
+     */
+    public function activeConsultation(): HasOne
+    {
+        return $this->hasOne(Consultation::class)
+            ->whereIn('status', ['in_progress', 'pending'])
+            ->latestOfMany();
     }
 
     public function whatsappReminders(): HasMany

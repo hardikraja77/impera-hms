@@ -1,7 +1,13 @@
 import axios from 'axios';
 
+// The relative '/api' base is correct for development: Vite proxies /api to
+// Laravel (see frontend/vite.config.js), so requests are same-origin and the
+// browser shows localhost:5173/api/login — that is EXPECTED, not a bug.
+// Only when the frontend is served from a different origin than the backend
+// (no Vite proxy in production), set VITE_API_URL in frontend/.env to the full
+// backend base URL, e.g. VITE_API_URL=http://localhost:8000/api
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_URL || '/api',
   headers: {
     'Content-Type': 'application/json',
     'Accept': 'application/json',

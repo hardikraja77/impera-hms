@@ -5,16 +5,17 @@ namespace App\Events;
 use App\Models\Patient;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
-use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class PatientCreated implements ShouldBroadcast
+class PatientCreated implements ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
     public function __construct(
         public Patient $patient,
+        public bool $isNew = false,
     ) {}
 
     /**
@@ -67,6 +68,7 @@ class PatientCreated implements ShouldBroadcast
                 'appointment_time' => $this->patient->appointment_time?->toISOString(),
                 'created_at' => $this->patient->created_at->toISOString(),
             ],
+            'is_new' => $this->isNew,
             'message' => "New patient {$this->patient->name} registered and assigned to Dr. {$this->patient->doctor?->user?->name}",
         ];
     }

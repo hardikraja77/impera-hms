@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Events\ConsultationUpdated;
 use App\Events\PatientCreated;
 use App\Events\PatientStatusUpdated;
 use App\Http\Controllers\Controller;
+use App\Models\Consultation;
 use App\Models\Doctor;
 use App\Models\Patient;
 use Illuminate\Http\JsonResponse;
@@ -26,7 +28,7 @@ class ReceptionistController extends Controller
 
     /**
      * Smart phone number detection — fetch patient by phone
-     * Returns patient details, family members, and visit history
+     * Returns patient profiles, family members, and visit (consultation) history
      */
     public function findByPhone(Request $request): JsonResponse
     {
@@ -35,8 +37,10 @@ class ReceptionistController extends Controller
         ]);
 
         $phone = $request->phone;
+
+        // Find the latest patient profile for this phone
         $patient = Patient::where('phone', $phone)
-            ->with(['doctor.user', 'creator', 'consultation'])
+            ->with(['doctor.user', 'creator'])
             ->latest()
             ->first();
 
@@ -47,25 +51,29 @@ class ReceptionistController extends Controller
             ]);
         }
 
-        // Get family members (patients sharing the same family_id or this patient as head)
-        $familyMembers = Patient::where(function ($q) use ($patient) {
-            $q->where('family_id', $patient->family_id ?? $patient->id)
-              ->orWhere('id', $patient->family_id ?? $patient->id);
-        })
-        ->with(['doctor.user'])
-        ->get();
-
-        // Get visit history
-        $visitHistory = Patient::where('phone', $phone)
+        // Get all profiles under this phone (family members) — query by phone directly
+        $familyMembers = Patient::where('phone', $phone)
             ->with(['doctor.user', 'consultation'])
+            ->get();
+
+        // Get all visit history (consultations) for this phone number
+        $patientIds = $familyMembers->pluck('id');
+        $visitHistory = Consultation::whereIn('patient_id', $patientIds)
+            ->with(['doctor.user', 'patient', 'creator'])
             ->latest()
             ->get();
+
+        // Check if "Myself" profile already exists
+        $hasMyself = Patient::where('phone', $phone)
+            ->whereRaw('LOWER(relation) = ?', ['myself'])
+            ->exists();
 
         return response()->json([
             'exists' => true,
             'patient' => $patient,
             'family_members' => $familyMembers,
             'visit_history' => $visitHistory,
+            'has_myself' => $hasMyself,
         ]);
     }
 
@@ -76,18 +84,15 @@ class ReceptionistController extends Controller
     {
         $patient = Patient::findOrFail($patientId);
 
-        $familyMembers = Patient::where(function ($q) use ($patient) {
-            $q->where('family_id', $patient->family_id ?? $patient->id)
-              ->orWhere('id', $patient->family_id ?? $patient->id);
-        })
-        ->with(['doctor.user'])
-        ->get();
+        $familyMembers = Patient::where('phone', $patient->phone)
+            ->with(['doctor.user', 'consultation'])
+            ->get();
 
         return response()->json($familyMembers);
     }
 
     /**
-     * Store a new patient (with family linking and appointment)
+     * Store a new patient (first visit — creates patient profile + consultation)
      */
     public function storePatient(Request $request): JsonResponse
     {
@@ -97,32 +102,115 @@ class ReceptionistController extends Controller
             'gender' => 'required|in:male,female,other',
             'phone' => 'required|string|max:20',
             'symptoms' => 'nullable|string',
+            'temperature' => 'nullable|string|max:20',
+            'blood_pressure' => 'nullable|string|max:20',
+            'heart_rate' => 'nullable|string|max:20',
             'doctor_id' => 'required|exists:doctors,id',
             'relation' => 'nullable|string|max:50',
             'family_id' => 'nullable|exists:patients,id',
             'appointment_time' => 'nullable|date',
         ]);
 
+        // Prevent duplicate family member (same phone + name + relation)
+        $duplicateCheck = Patient::where('phone', $request->phone)
+            ->whereRaw('LOWER(name) = ?', [strtolower($request->name)])
+            ->whereRaw('LOWER(relation) = ?', [strtolower($request->relation ?? 'myself')])
+            ->first();
+
+        if ($duplicateCheck) {
+            return response()->json([
+                'message' => $request->name . ' (' . ($request->relation ?? 'Myself') . ') already exists under this phone number.',
+            ], 422);
+        }
+
+        // Auto-determine family_id: use the earliest patient under this phone as family head
+        $familyId = $request->family_id;
+        if (!$familyId) {
+            $existingFamilyHead = Patient::where('phone', $request->phone)
+                ->orderBy('id')
+                ->first();
+            $familyId = $existingFamilyHead?->id;
+        }
+
+        // Create patient profile (static data)
         $patient = Patient::create([
             'name' => $request->name,
             'age' => $request->age,
             'gender' => $request->gender,
             'phone' => $request->phone,
-            'symptoms' => $request->symptoms,
             'doctor_id' => $request->doctor_id,
             'created_by' => $request->user()->id,
             'status' => 'assigned',
             'relation' => $request->relation,
-            'family_id' => $request->family_id,
-            'appointment_time' => $request->appointment_time,
+            'family_id' => $familyId,
         ]);
 
-        // Broadcast real-time event to doctor, admin, and receptionist
+        // Create initial consultation (visit) record
+        $consultation = Consultation::create([
+            'patient_id' => $patient->id,
+            'doctor_id' => $request->doctor_id,
+            'symptoms' => $request->symptoms,
+            'temperature' => $request->temperature,
+            'blood_pressure' => $request->blood_pressure,
+            'heart_rate' => $request->heart_rate,
+            'appointment_time' => $request->appointment_time,
+            'created_by' => $request->user()->id,
+            'status' => 'pending',
+        ]);
+
+        // Broadcast real-time event
+        broadcast(new PatientCreated($patient, true));
+
+        return response()->json([
+            'patient' => $patient->load(['doctor.user', 'creator', 'consultation']),
+            'consultation' => $consultation,
+            'message' => 'Patient registered and first visit created successfully',
+        ], 201);
+    }
+
+    /**
+     * Create a new visit for an existing patient (returning patient)
+     */
+    public function storeVisit(Request $request): JsonResponse
+    {
+        $request->validate([
+            'patient_id' => 'required|exists:patients,id',
+            'symptoms' => 'nullable|string',
+            'temperature' => 'nullable|string|max:20',
+            'blood_pressure' => 'nullable|string|max:20',
+            'heart_rate' => 'nullable|string|max:20',
+            'doctor_id' => 'required|exists:doctors,id',
+            'appointment_time' => 'nullable|date',
+        ]);
+
+        $patient = Patient::findOrFail($request->patient_id);
+
+        // Create new consultation (visit) record
+        $consultation = Consultation::create([
+            'patient_id' => $patient->id,
+            'doctor_id' => $request->doctor_id,
+            'symptoms' => $request->symptoms,
+            'temperature' => $request->temperature,
+            'blood_pressure' => $request->blood_pressure,
+            'heart_rate' => $request->heart_rate,
+            'appointment_time' => $request->appointment_time,
+            'created_by' => $request->user()->id,
+            'status' => 'pending',
+        ]);
+
+        // Update patient's current doctor and status
+        $patient->update([
+            'doctor_id' => $request->doctor_id,
+            'status' => 'assigned',
+        ]);
+
+        // Broadcast real-time event
         broadcast(new PatientCreated($patient));
 
         return response()->json([
-            'patient' => $patient->load(['doctor.user', 'creator']),
-            'message' => 'Patient added and assigned successfully',
+            'patient' => $patient->fresh(['doctor.user', 'creator', 'consultation']),
+            'consultation' => $consultation,
+            'message' => 'New visit created successfully for ' . $patient->name,
         ], 201);
     }
 
@@ -158,21 +246,27 @@ class ReceptionistController extends Controller
         $date = $request->date ?? now()->toDateString();
 
         $patients = Patient::where('created_by', $request->user()->id)
-            ->where(function ($q) use ($date) {
-                $q->whereDate('appointment_time', $date)
-                  ->orWhereDate('created_at', $date);
+            ->whereHas('consultation', function ($q) use ($date) {
+                $q->whereDate('appointment_time', $date);
             })
             ->with(['doctor.user', 'consultation'])
             ->orderBy('appointment_time')
             ->get();
 
-        return response()->json($patients);
+        // Also get patients created today without appointment_time
+        $createdToday = Patient::where('created_by', $request->user()->id)
+            ->whereDate('created_at', $date)
+            ->whereDoesntHave('consultation', function ($q) use ($date) {
+                $q->whereDate('appointment_time', $date);
+            })
+            ->with(['doctor.user', 'consultation'])
+            ->get();
+
+        return response()->json($patients->merge($createdToday)->values());
     }
 
     /**
      * Get doctor-assigned follow-up / next appointments
-     * Supports optional date filter (DATE(next_appointment) = selected_date)
-     * Only shows patients with doctor-set next_appointments, sorted chronologically
      */
     public function nextAppointments(Request $request): JsonResponse
     {
@@ -180,10 +274,8 @@ class ReceptionistController extends Controller
             $q->whereNotNull('next_appointment');
 
             if ($request->has('date') && $request->date) {
-                // Filter by exact date
                 $q->whereDate('next_appointment', $request->date);
             } else {
-                // Default: show from today onwards
                 $q->where('next_appointment', '>=', now()->toDateString());
             }
         })
@@ -196,7 +288,7 @@ class ReceptionistController extends Controller
     }
 
     /**
-     * Update patient status (pending → enquired → completed)
+     * Update patient status
      */
     public function updateStatus(Request $request, int $patientId): JsonResponse
     {
@@ -208,7 +300,6 @@ class ReceptionistController extends Controller
         $oldStatus = $patient->status;
         $patient->update(['status' => $request->status]);
 
-        // Broadcast real-time status update
         broadcast(new PatientStatusUpdated($patient, $oldStatus));
 
         return response()->json([
@@ -218,7 +309,7 @@ class ReceptionistController extends Controller
     }
 
     /**
-     * Generate WhatsApp enquiry link and mark patient as enquired
+     * Generate WhatsApp enquiry link
      */
     public function whatsappEnquiry(Request $request, int $patientId): JsonResponse
     {
@@ -226,8 +317,9 @@ class ReceptionistController extends Controller
         $phone = preg_replace('/[^0-9]/', '', $patient->phone);
 
         $hospitalName = config('app.name', 'HealthCare');
-        $appointmentTime = $patient->appointment_time
-            ? \Carbon\Carbon::parse($patient->appointment_time)->format('g:i A')
+        $consultation = $patient->consultation;
+        $appointmentTime = $consultation && $consultation->appointment_time
+            ? \Carbon\Carbon::parse($consultation->appointment_time)->format('g:i A')
             : 'your scheduled time';
 
         $message = "Hello {$patient->name},\n";
@@ -237,8 +329,12 @@ class ReceptionistController extends Controller
 
         $whatsappUrl = "https://wa.me/{$phone}?text=" . urlencode($message);
 
-        // Update status to enquired
+        $oldStatus = $patient->status;
         $patient->update(['status' => 'enquired']);
+
+        // Other dashboards must learn about the status change too — without this
+        // broadcast the doctor/admin dashboards stay stale after a WhatsApp enquiry.
+        broadcast(new PatientStatusUpdated($patient, $oldStatus));
 
         return response()->json([
             'whatsapp_url' => $whatsappUrl,

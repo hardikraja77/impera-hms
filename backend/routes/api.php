@@ -4,6 +4,8 @@ use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DoctorController;
 use App\Http\Controllers\Api\ReceptionistController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Broadcast;
 use Illuminate\Support\Facades\Route;
 
 // ── Public Routes ──
@@ -13,11 +15,18 @@ Route::post('/login', [AuthController::class, 'login']);
 // ── Authenticated Routes ──
 
 Route::middleware('auth:sanctum')->group(function () {
+    // Broadcast channel authorization (Laravel Echo posts here with the Bearer token
+    // before subscribing to private channels such as doctor.{id} / admin.dashboard)
+    Route::post('/broadcasting/auth', function (Request $request) {
+        return Broadcast::auth($request);
+    });
+
     // Auth routes
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::post('/logout-all', [AuthController::class, 'logoutAll']);
     Route::get('/user', [AuthController::class, 'user']);
     Route::get('/token/info', [AuthController::class, 'tokenInfo']);
+    Route::post('/change-password', [AuthController::class, 'changePassword']);
 
     // ── Admin Routes ──
 
@@ -39,6 +48,9 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // All patients
         Route::get('/patients', [AdminController::class, 'indexPatients']);
+
+        // Next appointments (follow-ups)
+        Route::get('/next-appointments', [AdminController::class, 'nextAppointments']);
     });
 
     // ── Doctor Routes ──
@@ -50,6 +62,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/completed-cases', [DoctorController::class, 'completedCases']);
         Route::get('/today-followups', [DoctorController::class, 'todayFollowups']);
         Route::post('/start-consultation/{patientId}', [DoctorController::class, 'startConsultation']);
+        Route::get('/visit-history/{patientId}', [DoctorController::class, 'visitHistory']);
         Route::put('/consultation/{consultationId}', [DoctorController::class, 'updateConsultation']);
         Route::post('/complete-consultation/{consultationId}', [DoctorController::class, 'completeConsultation']);
         Route::post('/whatsapp-reminder/{patientId}', [DoctorController::class, 'sendWhatsAppReminder']);
@@ -62,6 +75,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/patients', [ReceptionistController::class, 'storePatient']);
         Route::get('/patients', [ReceptionistController::class, 'patients']);
         Route::get('/patients/by-phone', [ReceptionistController::class, 'findByPhone']);
+        Route::post('/visits', [ReceptionistController::class, 'storeVisit']);
         Route::get('/patients/{id}/family', [ReceptionistController::class, 'familyMembers']);
         Route::get('/scheduled-patients', [ReceptionistController::class, 'scheduledPatients']);
         Route::get('/next-appointments', [ReceptionistController::class, 'nextAppointments']);

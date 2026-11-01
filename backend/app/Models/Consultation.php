@@ -13,16 +13,23 @@ class Consultation extends Model
     protected $fillable = [
         'patient_id',
         'doctor_id',
+        'symptoms',
+        'temperature',
+        'blood_pressure',
+        'heart_rate',
         'diagnosis',
         'treatment',
         'prescription',
         'notes',
+        'appointment_time',
         'next_appointment',
         'status',
+        'created_by',
     ];
 
     protected $casts = [
         'next_appointment' => 'date',
+        'appointment_time' => 'datetime',
     ];
 
     public function patient(): BelongsTo
@@ -33,5 +40,10 @@ class Consultation extends Model
     public function doctor(): BelongsTo
     {
         return $this->belongsTo(Doctor::class);
+    }
+
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 }

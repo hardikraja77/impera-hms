@@ -5,11 +5,11 @@ namespace App\Events;
 use App\Models\Consultation;
 use Illuminate\Broadcasting\InteractsWithSockets;
 use Illuminate\Broadcasting\PrivateChannel;
-use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class ConsultationUpdated implements ShouldBroadcast
+class ConsultationUpdated implements ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
@@ -47,12 +47,15 @@ class ConsultationUpdated implements ShouldBroadcast
                 'diagnosis' => $this->consultation->diagnosis,
                 'next_appointment' => $this->consultation->next_appointment?->toISOString(),
                 'patient_status' => $this->consultation->patient?->status,
+                'consultation_fee' => (float) ($this->consultation->doctor?->consultation_fee ?? 0),
                 'updated_at' => $this->consultation->updated_at->toISOString(),
             ],
             'action' => $this->action,
-            'message' => $this->action === 'completed'
-                ? "Consultation for {$this->consultation->patient?->name} completed by Dr. {$this->consultation->doctor?->user?->name}"
-                : "Consultation for {$this->consultation->patient?->name} updated by Dr. {$this->consultation->doctor?->user?->name}",
+            'message' => match ($this->action) {
+                'completed' => "Consultation for {$this->consultation->patient?->name} completed by Dr. {$this->consultation->doctor?->user?->name}",
+                'started' => "Consultation started for {$this->consultation->patient?->name}",
+                default => "Consultation for {$this->consultation->patient?->name} updated by Dr. {$this->consultation->doctor?->user?->name}",
+            },
         ];
     }
 }

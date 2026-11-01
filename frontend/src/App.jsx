@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import EchoInitializer from './components/EchoInitializer';
+import WebSocketOfflineBanner from './components/WebSocketOfflineBanner';
 import ProtectedRoute from './components/ProtectedRoute';
 import HomePage from './pages/HomePage';
 import LoginPage from './pages/LoginPage';
@@ -13,6 +14,7 @@ function App() {
   return (
     <AuthProvider>
       <EchoInitializer />
+      <WebSocketOfflineBanner />
       <BrowserRouter>
         <Routes>
           {/* Public Routes */}

@@ -28,6 +28,7 @@ class AdminController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users',
             'phone' => 'nullable|string',
+            'password' => 'required|string|min:6',
             'specialization' => 'required|string',
             'consultation_fee' => 'nullable|numeric|min:0',
             'available_days' => 'nullable|array',
@@ -38,7 +39,7 @@ class AdminController extends Controller
         $user = User::create([
             'name' => $request->name,
             'email' => $request->email,
-            'password' => bcrypt($request->password ?? 'password'),
+            'password' => bcrypt($request->password),
             'role' => 'doctor',
             'phone' => $request->phone,
         ]);
@@ -99,13 +100,13 @@ class AdminController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|email|unique:users',
             'phone' => 'nullable|string',
-            'password' => 'nullable|string|min:6',
+            'password' => 'required|string|min:6',
         ]);
 
         $user = User::create([
             'name' => $request->name,
             'email' => $request->email,
-            'password' => bcrypt($request->password ?? 'password'),
+            'password' => bcrypt($request->password),
             'role' => 'receptionist',
             'phone' => $request->phone,
         ]);
@@ -140,27 +141,22 @@ class AdminController extends Controller
     {
         $today = now()->toDateString();
 
-        // Date range filters
         $fromDate = $request->from_date ?? now()->subDays(30)->toDateString();
         $toDate = $request->to_date ?? $today;
         $filterDoctorId = $request->doctor_id;
-        $filterDepartment = $request->department; // specialization
+        $filterDepartment = $request->department;
 
-        // Base query scoped to date range
-        $patientQuery = Patient::whereBetween('created_at', [$fromDate . ' 00:00:00', $toDate . ' 23:59:59']);
+        // Count consultations (visits) in date range
+        $consultationQuery = Consultation::whereBetween('created_at', [$fromDate . ' 00:00:00', $toDate . ' 23:59:59']);
         if ($filterDoctorId) {
-            $patientQuery->where('doctor_id', $filterDoctorId);
+            $consultationQuery->where('doctor_id', $filterDoctorId);
         }
-        if ($filterDepartment) {
-            $patientQuery->whereHas('doctor', function ($q) use ($filterDepartment) {
-                $q->where('specialization', $filterDepartment);
-            });
-        }
+
+        $rangeVisits = (clone $consultationQuery)->count();
 
         // Overall counts
         $totalPatients = Patient::count();
-        $rangePatients = (clone $patientQuery)->count();
-        $todayPatients = Patient::whereDate('created_at', $today)->count();
+        $todayVisits = Consultation::whereDate('created_at', $today)->count();
         $assignedPatients = Patient::where('status', 'assigned')->count();
         $consultedPatients = Patient::where('status', 'consulted')->count();
         $completedPatients = Patient::where('status', 'completed')->count();
@@ -168,7 +164,7 @@ class AdminController extends Controller
         $activeDoctors = Doctor::where('is_active', true)->count();
         $totalReceptionists = User::where('role', 'receptionist')->count();
 
-        // Revenue tracking: completed consultations * doctor consultation_fee
+        // Revenue tracking
         $completedConsultations = Consultation::where('status', 'completed')
             ->whereBetween('updated_at', [$fromDate . ' 00:00:00', $toDate . ' 23:59:59']);
         if ($filterDoctorId) {
@@ -187,14 +183,12 @@ class AdminController extends Controller
             $doctorRevenue[$docId]['count']++;
         });
 
-        // Today's revenue
         $todayRevenue = Consultation::where('status', 'completed')
             ->whereDate('updated_at', $today)
             ->with('doctor')
             ->get()
             ->sum(fn ($c) => (float) ($c->doctor->consultation_fee ?? 0));
 
-        // Monthly revenue
         $monthStart = now()->startOfMonth()->toDateString();
         $monthlyRevenue = Consultation::where('status', 'completed')
             ->whereBetween('updated_at', [$monthStart . ' 00:00:00', now()->endOfMonth()->toDateTimeString()])
@@ -202,15 +196,15 @@ class AdminController extends Controller
             ->get()
             ->sum(fn ($c) => (float) ($c->doctor->consultation_fee ?? 0));
 
-        // Doctor-wise patient count (for the date range)
-        $doctorWiseCount = (clone $patientQuery)
+        // Doctor-wise patient count (based on consultations in range)
+        $doctorWiseCount = (clone $consultationQuery)
             ->select('doctor_id', DB::raw('count(*) as total'))
             ->groupBy('doctor_id')
             ->with('doctor.user')
             ->get();
 
-        // Daily stats for the date range
-        $dailyStats = (clone $patientQuery)
+        // Daily stats (consultations in range)
+        $dailyStats = (clone $consultationQuery)
             ->select(DB::raw('DATE(created_at) as date'), DB::raw('count(*) as total'))
             ->groupBy('date')
             ->orderBy('date')
@@ -225,12 +219,12 @@ class AdminController extends Controller
             ->get();
 
         // Appointment status distribution
-        $statusDistribution = $patientQuery
+        $statusDistribution = DB::table('consultations')
+            ->whereBetween('created_at', [$fromDate . ' 00:00:00', $toDate . ' 23:59:59'])
             ->select('status', DB::raw('count(*) as count'))
             ->groupBy('status')
             ->get();
 
-        // Available departments (specializations)
         $departments = Doctor::where('is_active', true)
             ->pluck('specialization')
             ->unique()
@@ -238,8 +232,8 @@ class AdminController extends Controller
 
         return response()->json([
             'total_patients' => $totalPatients,
-            'range_patients' => $rangePatients,
-            'today_patients' => $todayPatients,
+            'range_patients' => $rangeVisits,
+            'today_patients' => $todayVisits,
             'assigned_patients' => $assignedPatients,
             'consulted_patients' => $consultedPatients,
             'completed_patients' => $completedPatients,
@@ -272,10 +266,8 @@ class AdminController extends Controller
             $q->whereNotNull('next_appointment');
 
             if ($request->has('date') && $request->date) {
-                // Filter by exact date
                 $q->whereDate('next_appointment', $request->date);
             } else {
-                // Default: show from today onwards
                 $q->where('next_appointment', '>=', now()->toDateString());
             }
         })
@@ -283,7 +275,6 @@ class AdminController extends Controller
         ->get()
         ->sortBy('consultation.next_appointment');
 
-        // Optionally filter by doctor
         if ($request->doctor_id) {
             $patients = $patients->filter(fn ($p) => $p->doctor_id == $request->doctor_id);
         }

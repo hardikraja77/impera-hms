@@ -42,13 +42,7 @@ class AuthController extends Controller
         $token = $user->createToken('auth-token', [$user->role])->plainTextToken;
 
         return response()->json([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'role' => $user->role,
-                'phone' => $user->phone,
-            ],
+            'user' => $this->userPayload($user),
             'token' => $token,
             'expires_at' => now()->addMinutes(config('sanctum.expiration', 1440))->toIso8601String(),
         ]);
@@ -83,8 +77,20 @@ class AuthController extends Controller
      */
     public function user(Request $request): JsonResponse
     {
-        $user = $request->user();
+        return response()->json($this->userPayload($request->user()));
+    }
 
+    /**
+     * Shared authenticated-user payload used by both /login and /user.
+     *
+     * The doctor sub-object MUST be present in the login response too:
+     * the DoctorDashboard derives its private channel name from
+     * `user.doctor.id` — if it is missing the client subscribes to
+     * "doctor.undefined", channel auth returns 403, and the socket stays
+     * "connected" while no events ever arrive.
+     */
+    private function userPayload(User $user): array
+    {
         $data = [
             'id' => $user->id,
             'name' => $user->name,
@@ -100,7 +106,7 @@ class AuthController extends Controller
             ];
         }
 
-        return response()->json($data);
+        return $data;
     }
 
     /**
@@ -117,6 +123,33 @@ class AuthController extends Controller
             'created_at' => $token->created_at,
             'updated_at' => $token->updated_at,
             'expires_at' => $token->expires_at,
+        ]);
+    }
+
+    /**
+     * Change password
+     */
+    public function changePassword(Request $request): JsonResponse
+    {
+        $request->validate([
+            'current_password' => 'required',
+            'new_password' => 'required|string|min:6|confirmed',
+        ]);
+
+        $user = $request->user();
+
+        if (!Hash::check($request->current_password, $user->password)) {
+            throw ValidationException::withMessages([
+                'current_password' => ['The current password is incorrect.'],
+            ]);
+        }
+
+        $user->update([
+            'password' => bcrypt($request->new_password),
+        ]);
+
+        return response()->json([
+            'message' => 'Password changed successfully',
         ]);
     }
 }

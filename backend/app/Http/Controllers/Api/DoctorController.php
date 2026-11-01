@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Events\ConsultationUpdated;
+use App\Events\DoctorAvailabilityChanged;
 use App\Events\PatientStatusUpdated;
 use App\Http\Controllers\Controller;
 use App\Models\Consultation;
@@ -33,15 +34,19 @@ class DoctorController extends Controller
     }
 
     /**
-     * New enquiries — patients assigned to this doctor but not yet consulted
+     * New enquiries — consultations pending for this doctor
+     * Shows patients with status assigned/pending/enquired and their latest pending consultation
      */
     public function newEnquiries(Request $request): JsonResponse
     {
         $doctor = $request->user()->doctor;
 
+        // Get patients assigned to this doctor with pending/in_progress consultations
         $patients = Patient::where('doctor_id', $doctor->id)
             ->whereIn('status', ['pending', 'enquired', 'assigned'])
-            ->with('creator')
+            ->with(['creator', 'consultation' => function ($q) {
+                $q->whereIn('status', ['pending', 'in_progress'])->latest();
+            }])
             ->latest()
             ->get();
 
@@ -49,7 +54,7 @@ class DoctorController extends Controller
     }
 
     /**
-     * Consulted patients — in consultation
+     * Consulted patients — active consultations
      */
     public function consultedPatients(Request $request): JsonResponse
     {
@@ -57,7 +62,9 @@ class DoctorController extends Controller
 
         $patients = Patient::where('doctor_id', $doctor->id)
             ->where('status', 'consulted')
-            ->with(['creator', 'consultation'])
+            ->with(['creator', 'consultation' => function ($q) {
+                $q->where('status', 'in_progress')->latest();
+            }])
             ->latest()
             ->get();
 
@@ -81,22 +88,43 @@ class DoctorController extends Controller
     }
 
     /**
-     * Today's follow-ups
+     * Today's follow-ups (supports optional date filter)
      */
     public function todayFollowups(Request $request): JsonResponse
     {
         $doctor = $request->user()->doctor;
-        $today = now()->toDateString();
+        $date = $request->date ?? now()->toDateString();
 
         $patients = Patient::where('doctor_id', $doctor->id)
-            ->whereHas('consultation', function ($q) use ($today) {
-                $q->where('next_appointment', $today);
+            ->whereHas('consultation', function ($q) use ($date) {
+                $q->whereDate('next_appointment', $date);
             })
             ->with(['creator', 'consultation'])
             ->latest()
             ->get();
 
         return response()->json($patients);
+    }
+
+    /**
+     * Get visit history for a specific patient
+     */
+    public function visitHistory(Request $request, int $patientId): JsonResponse
+    {
+        $doctor = $request->user()->doctor;
+        $patient = Patient::where('id', $patientId)
+            ->where('doctor_id', $doctor->id)
+            ->firstOrFail();
+
+        $consultations = Consultation::where('patient_id', $patientId)
+            ->with('doctor.user')
+            ->orderByDesc('created_at')
+            ->get();
+
+        return response()->json([
+            'patient' => $patient,
+            'visits' => $consultations,
+        ]);
     }
 
     /**
@@ -110,16 +138,28 @@ class DoctorController extends Controller
             ->whereIn('status', ['assigned', 'pending', 'enquired'])
             ->firstOrFail();
 
-        $consultation = Consultation::create([
-            'patient_id' => $patient->id,
-            'doctor_id' => $doctor->id,
-            'status' => 'in_progress',
-        ]);
+        // Find or create the latest pending consultation for this patient+doctor
+        $consultation = Consultation::where('patient_id', $patientId)
+            ->where('doctor_id', $doctor->id)
+            ->where('status', 'pending')
+            ->first();
+
+        if (!$consultation) {
+            // No pending consultation found — create one (for legacy patients)
+            $consultation = Consultation::create([
+                'patient_id' => $patient->id,
+                'doctor_id' => $doctor->id,
+                'status' => 'in_progress',
+            ]);
+        } else {
+            $consultation->update(['status' => 'in_progress']);
+        }
 
         $patient->update(['status' => 'consulted']);
 
-        // Broadcast status update
         broadcast(new PatientStatusUpdated($patient, 'assigned'));
+        broadcast(new ConsultationUpdated($consultation, 'started'));
+        broadcast(new DoctorAvailabilityChanged($request->user()->doctor, 'busy'));
 
         return response()->json([
             'patient' => $patient->fresh(),
@@ -148,14 +188,15 @@ class DoctorController extends Controller
             ->firstOrFail();
 
         $consultation->update($request->only([
-            'diagnosis',
-            'treatment',
-            'prescription',
-            'notes',
-            'next_appointment',
+            'diagnosis', 'treatment', 'prescription', 'notes', 'next_appointment',
         ]));
 
-        // Broadcast real-time consultation update
+        // Update consultation vitals if provided
+        $vitals = $request->only(['temperature', 'blood_pressure', 'heart_rate']);
+        if (array_filter($vitals)) {
+            $consultation->update($vitals);
+        }
+
         broadcast(new ConsultationUpdated($consultation, 'updated'));
 
         return response()->json([
@@ -188,7 +229,23 @@ class DoctorController extends Controller
             ['status' => 'completed']
         ));
 
-        $consultation->patient->update(['status' => 'completed']);
+        // Update consultation vitals if provided
+        $vitals = $request->only(['temperature', 'blood_pressure', 'heart_rate']);
+        if (array_filter($vitals)) {
+            $consultation->update($vitals);
+        }
+
+        // Check if patient has any other active consultations
+        $hasOtherActive = Consultation::where('patient_id', $consultation->patient_id)
+            ->where('id', '!=', $consultationId)
+            ->whereIn('status', ['pending', 'in_progress'])
+            ->exists();
+
+        // Only mark patient as completed if no other active consultations
+        if (!$hasOtherActive) {
+            $consultation->patient->update(['status' => 'completed']);
+            broadcast(new DoctorAvailabilityChanged($request->user()->doctor, 'available'));
+        }
 
         // Create follow-up reminder if next appointment is set
         if ($consultation->next_appointment) {
@@ -199,7 +256,6 @@ class DoctorController extends Controller
             ]);
         }
 
-        // Broadcast real-time consultation completed event
         broadcast(new ConsultationUpdated($consultation, 'completed'));
         broadcast(new PatientStatusUpdated($consultation->patient, 'consulted'));
 
@@ -220,7 +276,6 @@ class DoctorController extends Controller
         $message = urlencode("Hello {$patient->name}, this is your appointment reminder for today.");
         $whatsappUrl = "https://wa.me/{$phone}?text={$message}";
 
-        // Mark reminder as sent for today
         WhatsappReminder::updateOrCreate(
             [
                 'patient_id' => $patientId,
