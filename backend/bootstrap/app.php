@@ -19,8 +19,21 @@ return Application::configure(basePath: dirname(__DIR__))
             'role' => RoleMiddleware::class,
         ]);
 
-        $middleware->statefulApi();
-
+        // NOTE: We deliberately do NOT call $middleware->statefulApi().
+        //
+        // This API is 100% stateless token auth (Sanctum personal access tokens +
+        // "Authorization: Bearer" header, stored in localStorage on the SPA). The
+        // SPA never calls /sanctum/csrf-cookie and never sends a CSRF token, and
+        // Laravel Echo authenticates the broadcasting channel with the Bearer
+        // token too. statefulApi() would inject VerifyCsrfToken into the API
+        // stack for any request whose Origin matches a "stateful" domain
+        // (config/sanctum.php -> SANCTUM_STATEFUL_DOMAINS, which by default also
+        // includes APP_URL's host). In production the SPA's Origin matches that
+        // host, so VerifyCsrfToken runs and rejects the login with
+        // "419 CSRF token mismatch" because no CSRF token is ever sent. Removing
+        // statefulApi() makes the API purely stateless and eliminates the 419 in
+        // every environment while leaving Bearer-token + Echo auth fully working.
+        //
         // This is a token-based (Sanctum) API with no named "login" route.
         // When an unauthenticated request hits a protected route and does NOT
         // send Accept: application/json (raw browser / curl / fetch calls),
