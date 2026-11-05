@@ -1,93 +1,144 @@
+
 import Echo from 'laravel-echo';
 import Pusher from 'pusher-js';
 
-// Make Pusher available globally for Echo
 window.Pusher = Pusher;
 
 let echo = null;
 
-const SCHEME = (import.meta.env.VITE_REVERB_SCHEME || 'http').toLowerCase();
+const SCHEME = (
+  import.meta.env.VITE_REVERB_SCHEME || 'https'
+).toLowerCase();
 
-/**
- * Initialize Laravel Echo connection (Laravel Reverb broadcaster).
- * Only connects when a valid token exists (user is authenticated).
- *
- * Dev default:  ws://localhost:8080/app/{key}   (VITE_REVERB_SCHEME=http)
- * Prod default: wss://your-domain/app/{key}     (VITE_REVERB_SCHEME=https, port 443)
- *
- * Only the transport matching VITE_REVERB_SCHEME is enabled, so the client
- * never falls back to wss:// on the plain ws port (which is what produced
- * the "WebSocket connection failed: net::ERR_CONNECTION_REFUSED" noise).
- */
+const IS_TLS = SCHEME === 'https';
+
+const HOST =
+  import.meta.env.VITE_REVERB_HOST ||
+  window.location.hostname;
+
+const KEY = import.meta.env.VITE_REVERB_APP_KEY;
+
+const WS_PORT = Number(
+  import.meta.env.VITE_REVERB_WS_PORT || 80
+);
+
+const WSS_PORT = Number(
+  import.meta.env.VITE_REVERB_WSS_PORT || 443
+);
+
+const AUTH_ENDPOINT =
+  import.meta.env.VITE_REVERB_AUTH_ENDPOINT ||
+  '/api/broadcasting/auth';
+
 export function initEcho() {
   const token = localStorage.getItem('token');
-  if (!token) return null;
+
+  if (!token) {
+    console.warn('[Echo] No authentication token found.');
+    return null;
+  }
+
   if (echo) return echo;
 
-  const isTLS = SCHEME === 'https';
+  if (!KEY || !HOST) {
+    console.error('[Echo] Missing configuration.');
+    return null;
+  }
+
+  console.info('[Echo] Initializing:', {
+    host: HOST,
+    wsPort: WS_PORT,
+    wssPort: WSS_PORT,
+    forceTLS: IS_TLS,
+  });
 
   echo = new Echo({
     broadcaster: 'reverb',
-    key: import.meta.env.VITE_REVERB_APP_KEY,
-    wsHost: import.meta.env.VITE_REVERB_HOST || window.location.hostname || 'localhost',
-    wsPort: import.meta.env.VITE_REVERB_PORT || 8080,
-    wssPort: import.meta.env.VITE_REVERB_WSS_PORT || 443,
-    forceTLS: isTLS,
-    // Enable only the transport for the configured scheme — avoids a failing
-    // ws -> wss fallback attempt on a non-TLS server (or vice versa).
-    enabledTransports: isTLS ? ['wss'] : ['ws'],
-    // Reverb keeps connections alive; pusher-js retries automatically on drop.
+    key: KEY,
+
+    wsHost: HOST,
+    wsPort: WS_PORT,
+    wssPort: WSS_PORT,
+
+    forceTLS: IS_TLS,
+
+    enabledTransports: ['ws', 'wss'],
+
     activityTimeout: 30000,
     pongTimeout: 30000,
+    unavailableTimeout: 10000,
+
+    authEndpoint: AUTH_ENDPOINT,
+
     auth: {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/json',
       },
     },
-    // Same-origin in dev (Vite proxies /api to Laravel) and in a same-origin
-    // production deployment. Set VITE_REVERB_AUTH_ENDPOINT to override for
-    // cross-origin setups, e.g. https://api.example.com/api/broadcasting/auth
-    authEndpoint: import.meta.env.VITE_REVERB_AUTH_ENDPOINT || '/api/broadcasting/auth',
   });
 
-  // Surface the connection lifecycle in the console for easy verification:
-  //   "Pusher : State changed, new state: connected" = WebSocket is live.
-  echo.connector.pusher.connection.bind('connected', () => {
-    console.info('[Echo] WebSocket connected');
+  window.echo = echo;
+
+  const connection = echo.connector.pusher.connection;
+
+  connection.bind('state_change', (states) => {
+    console.log(
+      '[Echo] State:',
+      states.previous,
+      '->',
+      states.current
+    );
   });
-  echo.connector.pusher.connection.bind('error', (err) => {
-    console.error('[Echo] WebSocket error:', err);
+
+  connection.bind('connected', () => {
+    console.log('[Echo] Connected successfully!');
+
+    console.log(
+      '[Echo] Socket ID:',
+      connection.socket_id
+    );
+  });
+
+  connection.bind('error', (error) => {
+    console.error('[Echo] Connection error:', error);
+  });
+
+  connection.bind('failed', () => {
+    console.error('[Echo] Connection failed.');
+  });
+
+  connection.bind('unavailable', () => {
+    console.error('[Echo] Connection unavailable.');
+  });
+
+  connection.bind('disconnected', () => {
+    console.warn('[Echo] Disconnected.');
   });
 
   return echo;
 }
 
-/**
- * Get the Echo instance
- */
 export function getEcho() {
   return echo;
 }
 
-/**
- * Disconnect Echo and clean up
- */
 export function disconnectEcho() {
   if (echo) {
     echo.disconnect();
     echo = null;
+    console.log('[Echo] Disconnected.');
   }
 }
 
-/**
- * Subscribe to a private channel
- */
 export function subscribePrivate(channelName, event, callback) {
-  const e = initEcho();
-  if (!e) return null;
+  const instance = initEcho();
 
-  return e.private(channelName).listen(event, callback);
+  if (!instance) return null;
+
+  return instance
+    .private(channelName)
+    .listen(event, callback);
 }
 
 export default echo;

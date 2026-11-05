@@ -75,23 +75,54 @@ const CONNECTION_MAP = {
  */
 export function useEchoStatus() {
   const { user } = useAuth();
-  // 'idle' before login; the dashboards (and this indicator) unmount on logout
-  const [status, setStatus] = useState(() => (user ? 'connecting' : 'idle'));
+  const [status, setStatus] = useState('idle');
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setStatus('idle');
+      return;
+    }
+
+    setStatus('connecting');
 
     const echo = initEcho();
-    if (!echo) return;
+
+    if (!echo) {
+      console.error('[Echo] Initialization failed. Check authentication token.');
+      setStatus('disconnected');
+      return;
+    }
 
     const connection = echo.connector.pusher.connection;
-    const apply = (raw) => setStatus(CONNECTION_MAP[raw] || 'connecting');
-    apply(connection.state);
 
-    const onStateChange = ({ current }) => apply(current);
+    const CONNECTION_MAP = {
+      initialized: 'connecting',
+      connecting: 'connecting',
+      connected: 'connected',
+      unavailable: 'reconnecting',
+      failed: 'disconnected',
+      disconnected: 'disconnected',
+    };
+
+    const applyStatus = (state) => {
+      const nextStatus = CONNECTION_MAP[state] || 'connecting';
+      setStatus(nextStatus);
+
+      console.info(`[Echo] Connection status: ${state}`);
+    };
+
+    // Read the current connection state immediately
+    applyStatus(connection.state);
+
+    const onStateChange = ({ current }) => {
+      applyStatus(current);
+    };
+
     connection.bind('state_change', onStateChange);
 
-    return () => connection.unbind('state_change', onStateChange);
+    return () => {
+      connection.unbind('state_change', onStateChange);
+    };
   }, [user]);
 
   return status;
@@ -106,14 +137,12 @@ export function useEchoConnection() {
 
   useEffect(() => {
     if (user) {
+      console.info('[Echo] Initializing connection');
       initEcho();
     } else {
+      console.info('[Echo] User logged out. Disconnecting.');
       disconnectEcho();
     }
-
-    return () => {
-      disconnectEcho();
-    };
   }, [user]);
 }
 
